@@ -1,0 +1,50 @@
+# Visual Studio
+.vs/
+*.suo
+*.user
+*.userosf
+*.sln.docstates
+
+# Build results
+[Bb]in/
+[Oo]bj/
+
+# Packages
+*.nupkg
+*.snupkg
+
+# Rider
+.idea/
+
+# ReSharper
+*.resharper
+
+# dotCover
+*.dotcover
+
+# NuGet
+.nuget/
+
+# Azure Functions
+host.json
+local.settings.json
+
+# Logs
+*.log
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Editor-specific files
+.vscode/
+
+# Temporary files
+*~
+
+# User secrets
+appsettings.Development.json
+appsettings.Production.json
+
+# Other
+AIA/

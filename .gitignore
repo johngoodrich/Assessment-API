@@ -45,3 +45,6 @@ Thumbs.db
 # User secrets
 appsettings.Development.json
 appsettings.Production.json
+
+# Other
+AIA/

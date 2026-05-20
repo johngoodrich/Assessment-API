@@ -23,8 +23,8 @@ var app = builder.Build();
 
 app.UseCors();
 
-// Define AIA folder path
-var aiaFolderPath = Path.Combine(AppContext.BaseDirectory, "AIA");
+// Define AIA folder path relative to the project root
+var aiaFolderPath = Path.Combine(app.Environment.ContentRootPath, "AIA");
 if (!Directory.Exists(aiaFolderPath))
 {
     Directory.CreateDirectory(aiaFolderPath);

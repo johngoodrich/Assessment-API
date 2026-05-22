@@ -1,60 +1,75 @@
-# Assessment Backend
+# AI Maturity Assessment - Backend API
 
-This is the backend service for the AI Maturity Assessment application. It provides API endpoints to serve an Excel assessment template and to save the results of a completed assessment.
+A lightweight .NET Minimal API designed to manage Excel-based assessment templates and result persistence.
 
 ## Technologies Used
-
 - .NET (C#)
-- ASP.NET Core Minimal APIs
+- ASP.NET Core Minimal API
 
-## Prerequisites
-
-- .NET SDK (version 6.0 or higher)
-
-## Setup and Running
-
-1.  **Clone the repository:**
-
-    ```bash
-    git clone <repository-url>
-    cd assessment-backend
-    ```
-
-2.  **Restore dependencies:**
-
-    ```bash
-    dotnet restore
-    ```
-
-3.  **Run the application:**
-
-    ```bash
-    dotnet run
-    ```
-
-    The application will start and listen on `http://localhost:3000`.
+## Core Architecture
+The service acts as a simple file bridge. It manages a local `AIA/` directory relative to the content root, serving as a repository for both the master template and user-submitted results.
 
 ## API Endpoints
 
 ### `GET /api/get-assessment-template`
+Locates and streams the master Excel workbook.
 
-Serves the `AI_Maturity_Assessment.xlsx` Excel template file.
+**Response:**
+- **Status:** `200 OK`
+- **Content-Type:** `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`
+- **Errors:** `404 Not Found` if the template is missing from the `AIA/` directory.
 
 ### `POST /api/save-assessment-results`
-
-Receives an Excel file (e.g., `Results.xlsx`) and saves it to the `AIA` folder.
+Performs a binary copy of the request body to a local file.
 
 **Headers:**
-- `x-filename`: (Optional) Specifies the desired filename for the saved results. Defaults to `Results.xlsx`.
+- `x-filename`: (Optional) The target filename (e.g., `UserDept_Assessment.xlsx`). Defaults to `Results.xlsx`.
 
 **Request Body:**
-- The raw binary content of the Excel file.
+- Expected: Raw binary stream of the `.xlsx` file.
 
-## Project Structure
+**Response:**
+- **Status:** `200 OK`
+- **Body:** 
+  ```json
+  {
+    "message": "File saved successfully",
+    "path": ".../AIA/filename.xlsx"
+  }
+  ```
+- **Errors:** `400 Bad Request` if the body is empty; `500 Internal Server Error` on IO exceptions.
 
-- `Program.cs`: Entry point of the application, configures services, CORS, and defines API endpoints.
-- `AIA/`: Directory where the `AI_Maturity_Assessment.xlsx` template is stored and where assessment results are saved. This folder is created if it doesn't exist.
+## Development Workflow
 
-## CORS Policy
+### Configuration
+The application is hardcoded to listen on `http://0.0.0.0:3000`. This allows for easy access across containers or local network interfaces.
 
-The application is configured with a permissive CORS policy (`AllowAnyOrigin`, `AllowAnyHeader`, `AllowAnyMethod`) for development purposes. For production deployments, it is recommended to restrict this policy to specific origins.
+### Local Setup
+```bash
+# Restore and build
+dotnet build
+
+# Run in development mode
+dotnet run
+```
+
+### Directory Structure
+```text
+assessment-backend/
+├── AIA/                 # Auto-created storage directory
+│   └── AI_Maturity_Assessment.xlsx  # Place master template here
+├── Program.cs           # Main entry point & Route definitions
+└── assessment-backend.csproj
+```
+
+## Infrastructure Notes
+
+### CORS
+Currently uses a global permissive policy:
+```csharp
+policy.AllowAnyOrigin().AllowAnyHeader().AllowAnyMethod();
+```
+*Warning: This should be restricted to the specific frontend origin before production deployment.*
+
+### File Handling
+The service uses `MemoryStream` to buffer the request body before writing to disk. For very large workbooks, consider refactoring to stream directly to a `FileStream` to reduce memory overhead.

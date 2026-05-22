@@ -3,12 +3,14 @@ using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.FileProviders;
 
-var builder = WebApplication.CreateBuilder(args);
+ // Initialize the web application builder to configure services and the web host.
+ var builder = WebApplication.CreateBuilder(args);
 
-// Explicitly set the listening URL
+// Force the application to listen on port 3000 across all network interfaces (0.0.0.0).
 builder.WebHost.UseUrls("http://0.0.0.0:3000");
 
-// Enable CORS
+// Enable Cross-Origin Resource Sharing (CORS) with a permissive policy.
+// This is useful for development but should be restricted to specific origins in production.
 builder.Services.AddCors(options =>
 {
     options.AddDefaultPolicy(policy =>
@@ -23,7 +25,8 @@ var app = builder.Build();
 
 app.UseCors();
 
-// Define AIA folder path relative to the project root
+// Ensure the storage directory ('AIA') exists within the application's root directory.
+// This folder will hold both the assessment templates and the uploaded results.
 var aiaFolderPath = Path.Combine(app.Environment.ContentRootPath, "AIA");
 if (!Directory.Exists(aiaFolderPath))
 {
@@ -31,7 +34,9 @@ if (!Directory.Exists(aiaFolderPath))
     Console.WriteLine($"Created directory: {aiaFolderPath}");
 }
 
-// ✅ GET: Serve Excel template
+// ✅ GET: Serve the AI Maturity Assessment Excel template.
+// This endpoint locates the template file on disk and streams it back to the client
+// with the appropriate Excel MIME type.
 app.MapGet("/api/get-assessment-template", async (HttpContext context) =>
 {
     var filePath = Path.Combine(aiaFolderPath, "AI_Maturity_Assessment.xlsx");
@@ -48,9 +53,12 @@ app.MapGet("/api/get-assessment-template", async (HttpContext context) =>
     await context.Response.SendFileAsync(filePath);
 });
 
-// ✅ POST: Save Excel results
+// ✅ POST: Receive and save assessment results.
+// It reads a custom 'x-filename' header for the target name and copies the binary
+// request body into a local file within the AIA folder.
 app.MapPost("/api/save-assessment-results", async (HttpRequest request, HttpResponse response) =>
 {
+    // Default to Results.xlsx if no filename header is provided.
     var filename = request.Headers["x-filename"].FirstOrDefault() ?? "Results.xlsx";
     var filePath = Path.Combine(aiaFolderPath, filename);
 
@@ -61,6 +69,7 @@ app.MapPost("/api/save-assessment-results", async (HttpRequest request, HttpResp
 
     if (memoryStream.Length == 0)
     {
+        // Return a Bad Request if the body is empty.
         response.StatusCode = 400;
         await response.WriteAsync("No data received.");
         return;
@@ -68,6 +77,7 @@ app.MapPost("/api/save-assessment-results", async (HttpRequest request, HttpResp
 
     try
     {
+        // Save the stream contents to the specified path asynchronously.
         await File.WriteAllBytesAsync(filePath, memoryStream.ToArray());
 
         Console.WriteLine($"Successfully saved updated workbook to {filePath}");

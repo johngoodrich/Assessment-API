@@ -2,6 +2,7 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.FileProviders;
+using System.IO;
 using ClosedXML.Excel;
 
  // Initialize the web application builder to configure services and the web host.
@@ -24,43 +25,166 @@ builder.Services.AddCors(options =>
 
 var app = builder.Build();
 
-app.UseCors();
-
-// Ensure the storage directory ('AIA') exists within the application's root directory.
-// This folder will hold both the assessment templates and the uploaded results.
+// 1. Set up Paths and Global Configuration
 var aiaFolderPath = Path.Combine(app.Environment.ContentRootPath, "AIA");
 if (!Directory.Exists(aiaFolderPath))
 {
     Directory.CreateDirectory(aiaFolderPath);
-    Console.WriteLine($"Created directory: {aiaFolderPath}");
 }
 
-// ✅ GET: Serve the AI Maturity Assessment Excel template.
-// This endpoint locates the template file on disk and streams it back to the client
-// with the appropriate Excel MIME type.
-app.MapGet("/api/get-assessment-template", async (HttpContext context) =>
+var excelPath = Path.Combine(aiaFolderPath, "AI_Maturity_Assessment.xlsx");
+var frontendPath = Path.Combine(app.Environment.ContentRootPath, "..", "assessment-questionnaire", "dist", "assessment-questionnaire", "browser");
+
+Console.WriteLine($"[INIT] Looking for Excel file at: {Path.GetFullPath(excelPath)}");
+
+// 2. Middleware Configuration
+app.UseCors();
+
+// 3. API Routes (Grouped together for reliability)
+
+// ✅ GET: Get list of roles from 'AIA-UI-Config'
+app.MapGet("/api/config/roles", () =>
 {
-    var filePath = Path.Combine(aiaFolderPath, "AI_Maturity_Assessment.xlsx");
+    if (!File.Exists(excelPath)) return Results.NotFound();
 
-    if (!File.Exists(filePath))
+    try
     {
-        Console.WriteLine($"File not found: {filePath}");
-        context.Response.StatusCode = 404;
-        await context.Response.WriteAsync("AI_Maturity_Assessment.xlsx not found in the AIA folder.");
-        return;
-    }
+        using var workbook = new XLWorkbook(excelPath);
+        var sheet = workbook.Worksheet("AIA-UI-Config");
+        if (sheet == null) return Results.NotFound("UI Config sheet missing.");
 
-    context.Response.ContentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
-    await context.Response.SendFileAsync(filePath);
+        var roles = sheet.RowsUsed()
+            .Skip(1) // Skip header
+            .Select(r => r.Cell(1).GetValue<string>().Trim())
+            .Where(r => !string.IsNullOrEmpty(r))
+            .Distinct()
+            .ToList();
+
+        return Results.Ok(roles);
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem($"Error reading roles: {ex.Message}");
+    }
+});
+
+// ✅ GET: Get questions and mapped answers for a specific role
+app.MapGet("/api/config/questions", (string role) =>
+{
+    if (!File.Exists(excelPath)) return Results.NotFound();
+    if (string.IsNullOrEmpty(role)) return Results.BadRequest("Role is required.");
+
+    try
+    {
+        using var workbook = new XLWorkbook(excelPath);
+        
+        // 1. Load Answer Map
+        var answerSheet = workbook.Worksheet("AIA-Question-Response-Map");
+        var answerMap = answerSheet.RowsUsed()
+            .Skip(1)
+            .Select(r => new { 
+                Id = r.Cell(1).GetValue<string>(), 
+                Text = r.Cell(2).GetValue<string>(), 
+                Score = r.Cell(3).GetValue<int>() 
+            })
+            .GroupBy(a => a.Id)
+            .ToDictionary(g => g.Key, g => g.Select(x => new ResponseOption(x.Text, x.Score)).ToList());
+
+        // 2. Load Questions filtered by Role
+        var questionSheet = workbook.Worksheet("AIA-Question-Config");
+        if (questionSheet == null) return Results.NotFound("Question Config sheet missing.");
+
+        var questions = questionSheet.RowsUsed()
+            .Skip(1)
+            .Where(r => r.Cell(2).GetValue<string>().Equals(role, StringComparison.OrdinalIgnoreCase))
+            .Select(r => {
+                var id = r.Cell(1).GetValue<string>();
+                return new
+                {
+                    id = id,
+                    role = r.Cell(2).GetValue<string>(),
+                    dimension = r.Cell(3).GetValue<string>(),
+                    pillar = r.Cell(4).GetValue<string>(),
+                    question = r.Cell(6).GetValue<string>(),
+                    responses = answerMap.TryGetValue(id, out var opts) ? opts : new List<ResponseOption>()
+                };
+            })
+            .ToList();
+
+        return Results.Ok(questions);
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem($"Error reading questions: {ex.Message}");
+    }
+});
+
+// ✅ GET: Get maturity band definitions from 'AIA-UI-Config'
+app.MapGet("/api/config/bands", () =>
+{
+    if (!File.Exists(excelPath)) return Results.NotFound();
+
+    try
+    {
+        using var workbook = new XLWorkbook(excelPath);
+        var sheet = workbook.Worksheet("AIA-UI-Config");
+        
+        var bands = sheet.RowsUsed()
+            .Skip(1)
+            .Select(r => new {
+                name = r.Cell(2).GetValue<string>(),
+                score = r.Cell(3).GetValue<string>()
+            })
+            .Where(b => !string.IsNullOrEmpty(b.name))
+            .ToList();
+
+        return Results.Ok(bands);
+    }
+    catch (Exception ex)
+    {
+        return Results.Problem($"Error reading bands: {ex.Message}");
+    }
+});
+
+// ✅ GET: Get calculated scores for the radar chart
+app.MapGet("/api/chart-data", () =>
+{
+    if (!File.Exists(excelPath)) return Results.NotFound();
+
+    try
+    {
+        // We use non-sharing mode to ensure we get a fresh read even if results were just saved
+        using var workbook = new XLWorkbook(excelPath);
+        
+        // Force Excel to recalculate formulas so chart data is accurate 
+        // based on the AIA-Response-Capture sheet data.
+        workbook.RecalculateAllFormulas();
+
+        var calcSheet = workbook.Worksheet("AIA-Calculations");
+        var uiSheet = workbook.Worksheet("AIA-UI-Config");
+
+        if (calcSheet == null || uiSheet == null) return Results.NotFound("Required sheets missing.");
+
+        var datasets = calcSheet.Rows(2, 5).Select(r => new {
+            label = r.Cell(1).GetValue<string>(),
+            data = new[] { r.Cell(2).GetValue<double>(), r.Cell(3).GetValue<double>(), r.Cell(4).GetValue<double>() },
+            backgroundColor = uiSheet.Row(r.RowNumber()).Cell(4).GetValue<string>(),
+            borderColor = uiSheet.Row(r.RowNumber()).Cell(5).GetValue<string>(),
+            borderWidth = uiSheet.Row(r.RowNumber()).Cell(6).GetValue<int>()
+        }).ToList();
+
+        return Results.Ok(datasets);
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"[ERROR] /api/chart-data: {ex.Message}");
+        return Results.Problem("Error processing chart data. Ensure Excel formulas are evaluated and cells contain valid numbers.");
+    }
 });
 
 // ✅ POST: Receive and save assessment results as JSON data.
-// This endpoint accepts a list of response objects, opens the local Excel master,
-// appends the data to the 'AIA-Response-Capture' sheet, and saves the workbook.
 app.MapPost("/api/save-assessment-results", async (List<AssessmentResponse> results, HttpResponse response) =>
 {
-    var filePath = Path.Combine(aiaFolderPath, "AI_Maturity_Assessment.xlsx");
-
     if (results == null || results.Count == 0)
     {
         response.StatusCode = 400;
@@ -68,7 +192,7 @@ app.MapPost("/api/save-assessment-results", async (List<AssessmentResponse> resu
         return;
     }
 
-    if (!File.Exists(filePath))
+    if (!File.Exists(excelPath))
     {
         response.StatusCode = 404;
         await response.WriteAsync("Template file not found on server.");
@@ -77,12 +201,10 @@ app.MapPost("/api/save-assessment-results", async (List<AssessmentResponse> resu
 
     try
     {
-        // Open the existing workbook using ClosedXML
-        using (var workbook = new XLWorkbook(filePath))
+        using (var workbook = new XLWorkbook(excelPath))
         {
             var sheet = workbook.Worksheet("AIA-Response-Capture") ?? workbook.AddWorksheet("AIA-Response-Capture");
 
-            // Add headers if the sheet is new/empty
             if (sheet.LastRowUsed() == null)
             {
                 sheet.Cell(1, 1).Value = "Respondent Role";
@@ -91,7 +213,6 @@ app.MapPost("/api/save-assessment-results", async (List<AssessmentResponse> resu
                 sheet.Cell(1, 4).Value = "Response Score";
             }
 
-            // Append each response to the next available row
             var nextRow = sheet.LastRowUsed()?.RowNumber() + 1 ?? 1;
             foreach (var res in results)
             {
@@ -105,20 +226,53 @@ app.MapPost("/api/save-assessment-results", async (List<AssessmentResponse> resu
             workbook.Save();
         }
 
-        Console.WriteLine($"Successfully appended {results.Count} results to {filePath}");
-
+        Console.WriteLine($"[SUCCESS] Appended {results.Count} results to {excelPath}");
         response.ContentType = "application/json";
         await response.WriteAsJsonAsync(new { message = "Results saved successfully" });
     }
     catch (Exception ex)
     {
-        Console.WriteLine($"Error saving file: {ex}");
+        Console.WriteLine($"[ERROR] Failed to save results: {ex.Message}");
         response.StatusCode = 500;
         await response.WriteAsync($"Failed to save file: {ex.Message}");
     }
 });
 
+// ✅ GET: Serve the Excel template (Legacy endpoint for debugging)
+app.MapGet("/api/get-assessment-template", () => 
+    File.Exists(excelPath) 
+        ? Results.File(excelPath, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet") 
+        : Results.NotFound());
+
+
+// 4. Static Files and SPA Fallback (Must come LAST)
+if (Directory.Exists(frontendPath))
+{
+    app.UseDefaultFiles(new DefaultFilesOptions
+    {
+        FileProvider = new PhysicalFileProvider(frontendPath)
+    });
+    app.UseStaticFiles(new StaticFileOptions
+    {
+        FileProvider = new PhysicalFileProvider(frontendPath)
+    });
+}
+else
+{
+    Console.WriteLine($"Warning: Frontend build not found at {frontendPath}. Static files will not be served.");
+}
+
+if (Directory.Exists(frontendPath))
+{
+    app.MapFallbackToFile("index.html", new StaticFileOptions
+    {
+        FileProvider = new PhysicalFileProvider(frontendPath)
+    });
+}
+
 app.Run();
 
 // DTO for incoming assessment data
 public record AssessmentResponse(string Role, string QuestionId, string ResponseText, int ResponseScore);
+
+public record ResponseOption(string Response, int Score);

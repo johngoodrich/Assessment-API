@@ -2,6 +2,7 @@
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.FileProviders;
+using ClosedXML.Excel;
 
  // Initialize the web application builder to configure services and the web host.
  var builder = WebApplication.CreateBuilder(args);
@@ -53,48 +54,71 @@ app.MapGet("/api/get-assessment-template", async (HttpContext context) =>
     await context.Response.SendFileAsync(filePath);
 });
 
-// ✅ POST: Receive and save assessment results.
-// It reads a custom 'x-filename' header for the target name and copies the binary
-// request body into a local file within the AIA folder.
-app.MapPost("/api/save-assessment-results", async (HttpRequest request, HttpResponse response) =>
+// ✅ POST: Receive and save assessment results as JSON data.
+// This endpoint accepts a list of response objects, opens the local Excel master,
+// appends the data to the 'AIA-Response-Capture' sheet, and saves the workbook.
+app.MapPost("/api/save-assessment-results", async (List<AssessmentResponse> results, HttpResponse response) =>
 {
-    // Default to Results.xlsx if no filename header is provided.
-    var filename = request.Headers["x-filename"].FirstOrDefault() ?? "Results.xlsx";
-    var filePath = Path.Combine(aiaFolderPath, filename);
+    var filePath = Path.Combine(aiaFolderPath, "AI_Maturity_Assessment.xlsx");
 
-    Console.WriteLine($"Received request to save: {filename}");
-
-    using var memoryStream = new MemoryStream();
-    await request.Body.CopyToAsync(memoryStream);
-
-    if (memoryStream.Length == 0)
+    if (results == null || results.Count == 0)
     {
-        // Return a Bad Request if the body is empty.
         response.StatusCode = 400;
         await response.WriteAsync("No data received.");
         return;
     }
 
+    if (!File.Exists(filePath))
+    {
+        response.StatusCode = 404;
+        await response.WriteAsync("Template file not found on server.");
+        return;
+    }
+
     try
     {
-        // Save the stream contents to the specified path asynchronously.
-        await File.WriteAllBytesAsync(filePath, memoryStream.ToArray());
+        // Open the existing workbook using ClosedXML
+        using (var workbook = new XLWorkbook(filePath))
+        {
+            var sheet = workbook.Worksheet("AIA-Response-Capture") ?? workbook.AddWorksheet("AIA-Response-Capture");
 
-        Console.WriteLine($"Successfully saved updated workbook to {filePath}");
+            // Add headers if the sheet is new/empty
+            if (sheet.LastRowUsed() == null)
+            {
+                sheet.Cell(1, 1).Value = "Respondent Role";
+                sheet.Cell(1, 2).Value = "Question ID";
+                sheet.Cell(1, 3).Value = "Chosen Response";
+                sheet.Cell(1, 4).Value = "Response Score";
+            }
+
+            // Append each response to the next available row
+            var nextRow = sheet.LastRowUsed()?.RowNumber() + 1 ?? 1;
+            foreach (var res in results)
+            {
+                sheet.Cell(nextRow, 1).Value = res.Role;
+                sheet.Cell(nextRow, 2).Value = res.QuestionId;
+                sheet.Cell(nextRow, 3).Value = res.ResponseText;
+                sheet.Cell(nextRow, 4).Value = res.ResponseScore;
+                nextRow++;
+            }
+
+            workbook.Save();
+        }
+
+        Console.WriteLine($"Successfully appended {results.Count} results to {filePath}");
 
         response.ContentType = "application/json";
-        await response.WriteAsJsonAsync(new
-        {
-            message = "File saved successfully",
-            path = filePath
-        });
+        await response.WriteAsJsonAsync(new { message = "Results saved successfully" });
     }
     catch (Exception ex)
     {
         Console.WriteLine($"Error saving file: {ex}");
         response.StatusCode = 500;
-        await response.WriteAsync("Failed to save file.");
+        await response.WriteAsync($"Failed to save file: {ex.Message}");
     }
 });
 
 app.Run();
+
+// DTO for incoming assessment data
+public record AssessmentResponse(string Role, string QuestionId, string ResponseText, int ResponseScore);

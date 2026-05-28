@@ -147,7 +147,7 @@ app.MapGet("/api/config/bands", () =>
 });
 
 // ✅ GET: Get calculated scores for the radar chart
-app.MapGet("/api/chart-data", () =>
+app.MapGet("/api/chart-data", async () =>
 {
     if (!File.Exists(excelPath)) return Results.NotFound();
 
@@ -158,20 +158,88 @@ app.MapGet("/api/chart-data", () =>
         
         // Force Excel to recalculate formulas so chart data is accurate 
         // based on the AIA-Response-Capture sheet data.
-        workbook.RecalculateAllFormulas();
+        try 
+        {
+            Console.WriteLine("[INFO] Attempting to recalculate Excel formulas...");
+            await Task.Run(() => workbook.RecalculateAllFormulas());
+            Console.WriteLine("[INFO] Excel formulas recalculation completed successfully.");
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[WARNING] Formula recalculation failed: {ex.Message}");
+        }
 
         var calcSheet = workbook.Worksheet("AIA-Calculations");
         var uiSheet = workbook.Worksheet("AIA-UI-Config");
 
         if (calcSheet == null || uiSheet == null) return Results.NotFound("Required sheets missing.");
 
-        var datasets = calcSheet.Rows(2, 5).Select(r => new {
-            label = r.Cell(1).GetValue<string>(),
-            data = new[] { r.Cell(2).GetValue<double>(), r.Cell(3).GetValue<double>(), r.Cell(4).GetValue<double>() },
-            backgroundColor = uiSheet.Row(r.RowNumber()).Cell(4).GetValue<string>(),
-            borderColor = uiSheet.Row(r.RowNumber()).Cell(5).GetValue<string>(),
-            borderWidth = uiSheet.Row(r.RowNumber()).Cell(6).GetValue<int>()
-        }).ToList();
+        // Debug data matching
+        var captureSheet = workbook.Worksheet("AIA-Response-Capture");
+        if (captureSheet != null)
+        {
+            var lastRow = captureSheet.LastRowUsed()?.RowNumber() ?? 0;
+            Console.WriteLine($"[DEBUG] AIA-Response-Capture has {lastRow - 1} data rows.");
+            if (lastRow > 1)
+            {
+                var sample = captureSheet.Row(2);
+                Console.WriteLine($"[DEBUG] Sample Data - Role: '{sample.Cell(1).Value}', Score: '{sample.Cell(4).Value}', Domain: '{sample.Cell(5).Value}'");
+            }
+        }
+
+        bool recalculateFailed = false;
+        var captureRows = captureSheet?.RowsUsed().Skip(1).ToList() ?? new List<IXLRow>();
+        var datasets = new List<object>();
+
+        // Helper function to perform the AVERAGEIFS logic in C# since the Excel engine is failing
+        double GetAverage(string role, string domain)
+        {
+            var scores = captureRows
+                .Where(row => 
+                    string.Equals(row.Cell(1).GetValue<string>().Trim(), role, StringComparison.OrdinalIgnoreCase) &&
+                    string.Equals(row.Cell(5).GetValue<string>().Trim(), domain, StringComparison.OrdinalIgnoreCase))
+                .Select(row => row.Cell(4).TryGetValue(out double s) ? s : 0)
+                .Where(s => s > 0)
+                .ToList();
+
+            return scores.Any() ? Math.Round(scores.Average(), 1) : 0;
+        }
+
+        foreach (var r in calcSheet.Rows(2, 5))
+        {
+            var uiR = uiSheet.Row(r.RowNumber());
+            var label = r.Cell(1).GetValue<string>()?.Trim();
+            
+            if (string.IsNullOrEmpty(label)) continue;
+
+            // Get headers for domains from B1, C1, D1
+            string h1 = calcSheet.Cell(1, 2).GetValue<string>().Trim();
+            string h2 = calcSheet.Cell(1, 3).GetValue<string>().Trim();
+            string h3 = calcSheet.Cell(1, 4).GetValue<string>().Trim();
+
+            // Calculate values using C# logic to bypass the buggy Excel engine
+            double val1 = GetAverage(label, h1);
+            double val2 = GetAverage(label, h2);
+            double val3 = GetAverage(label, h3);
+
+            if (val1 > 0 || val2 > 0 || val3 > 0)
+            {
+                Console.WriteLine($"[SUCCESS] Calculated data for {label}: {val1}, {val2}, {val3}");
+            }
+
+            datasets.Add(new {
+                label = label,
+                data = new[] { val1, val2, val3 },
+                backgroundColor = uiR.Cell(4).GetValue<string>(),
+                borderColor = uiR.Cell(5).GetValue<string>(),
+                borderWidth = uiR.Cell(6).GetValue<int>()
+            });
+        }
+
+        if (recalculateFailed)
+        {
+            Console.WriteLine("[WARN] Data returned as 0. This usually means the Excel formulas did not recalculate because of the 'Structured Reference' error.");
+        }
 
         return Results.Ok(datasets);
     }
@@ -205,21 +273,25 @@ app.MapPost("/api/save-assessment-results", async (List<AssessmentResponse> resu
         {
             var sheet = workbook.Worksheet("AIA-Response-Capture") ?? workbook.AddWorksheet("AIA-Response-Capture");
 
-            if (sheet.LastRowUsed() == null)
+            var lastRow = sheet.LastRowUsed()?.RowNumber() ?? 0;
+            if (lastRow == 0 || sheet.Cell(1,1).IsEmpty())
             {
-                sheet.Cell(1, 1).Value = "Respondent Role";
-                sheet.Cell(1, 2).Value = "Question ID";
-                sheet.Cell(1, 3).Value = "Chosen Response";
-                sheet.Cell(1, 4).Value = "Response Score";
+                sheet.Cell(1, 1).SetValue("Respondent Role");
+                sheet.Cell(1, 2).SetValue("Question ID");
+                sheet.Cell(1, 3).SetValue("Chosen Response");
+                sheet.Cell(1, 4).SetValue("Response Score");
+                sheet.Cell(1, 5).SetValue("Domain");
+                lastRow = 1;
             }
 
-            var nextRow = sheet.LastRowUsed()?.RowNumber() + 1 ?? 1;
+            var nextRow = lastRow + 1;
             foreach (var res in results)
             {
-                sheet.Cell(nextRow, 1).Value = res.Role;
-                sheet.Cell(nextRow, 2).Value = res.QuestionId;
-                sheet.Cell(nextRow, 3).Value = res.ResponseText;
+                sheet.Cell(nextRow, 1).Value = res.Role?.Trim(); // Column A
+                sheet.Cell(nextRow, 2).Value = res.QuestionId?.Trim();
+                sheet.Cell(nextRow, 3).Value = res.ResponseText?.Trim();
                 sheet.Cell(nextRow, 4).Value = res.ResponseScore;
+                sheet.Cell(nextRow, 5).Value = res.Domain?.Trim(); // Column E
                 nextRow++;
             }
 
@@ -272,7 +344,7 @@ if (Directory.Exists(frontendPath))
 
 app.Run();
 
-// DTO for incoming assessment data
-public record AssessmentResponse(string Role, string QuestionId, string ResponseText, int ResponseScore);
+// DTOs for incoming assessment data and response options
+public record AssessmentResponse(string Role, string QuestionId, string ResponseText, int ResponseScore, string Domain);
 
 public record ResponseOption(string Response, int Score);
